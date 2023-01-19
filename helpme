@@ -1,0 +1,137 @@
+"""
+Performs simple BEM simulations of the BAR turbines for different operating conditions.
+"""
+# --- Common libraries
+import os
+import numpy as np
+import pandas as pd
+import scipy as sp
+# --- Local libraries
+import weio
+from MiniBEM import MiniBEM, FASTFile2MiniBEM
+from wake_model import get_u_turb
+
+def diff(a, b, RPM, pitch, V0, xdot, u_turb,
+                           nB, cone, r, chord, twist, polars,
+                           rho, KinVisc, a0, ap0, nacelle_L):
+    """optimize ellipsoid shape to match rectangular prism"""
+    BEM = MiniBEM(RPM, pitch, V0, xdot, u_turb,
+                  nB, cone, r, chord, twist, polars,
+                  rho=rho, KinVisc=KinVisc, bTIDrag=False, bAIDrag=True,
+                  a_init=a0, ap_init=ap0)
+    r = np.linspace(0, 105, 1000)
+    x_0=0
+    u_turb_EM = get_u_turb(x0=x_0, r=r, cone=0, Uinf=8, Cd=0.2, a=1, b=0.2187, wake=False, type=
+    'rotor', plot=0, export=False)
+    CFD = pd.read_excel("../data/y0/nacelle_blockage_LES.xls", sheet_name=str(x_0) + "_comparison_data")
+    r_CFD = CFD.loc[:, "y"].to_numpy() * nacelle_L
+    u_turb_CFD = CFD.loc[:, "u_turb"].to_numpy()
+    f = sp.interpolate.interp1d(r_CFD, u_turb_CFD)
+    u_turb_CFD = f(r)
+    r1 = 0.5
+    r2 = 1.5
+    diff = 0
+    for i in range(0, len(r)):
+        if r(i) >= r1:
+            startind=i
+            break
+        if r(i) >= r2:
+            endind = i
+            break
+    for i in range(startind, endind):
+        diff += abs(u_turb_EM(i)-u_turb_CFD(i))
+    avgDiff = diff/(endind-startind-1)
+    return avgDiff
+
+def runParametricBEM_FAST(MainFASTFile, Pitch, Omega, WS):
+    """
+    Performs BEM simulations for different Pitch, RPM and Wind Speed.
+    The wind turbine is initialized using a FAST input file (.fst)
+    """
+    # -- Extracting information from a FAST main file and sub files
+    nB,cone,r,chord,twist,polars,rho,KinVisc = FASTFile2MiniBEM(MainFASTFile)
+    BladeData=np.column_stack((r,chord,twist))
+
+    # --- Running BEM simulations for each operating conditions
+    a0  = None # Initial guess for axial induction, to speed up BEM
+    ap0 = None # Initial guess for tangential induction, to speed up BEM
+    dfOut=None
+    blockage = 2  # Nacelle blockage flag. 0= none, 1=eng. model, 2=CFD
+    nacelle_L = 14.5988  # m
+    if not os.path.exists(OutDir):
+        os.makedirs(OutDir)
+    # run multiple WS
+    # for i in np.arange(len(df)):
+    #     V0    = WS[i]     # [m/s]
+    #     RPM    = Omega[i] # [rpm]
+    #     pitch  = Pitch[i] # [deg]
+    #     xdot   = 0        # [m/s]
+    #     u_turb = 0        # [m/s]
+    # run one WS
+        V0    = WS[1]     # [m/s]
+        RPM    = Omega[1] # [rpm]
+        pitch  = Pitch[1] # [deg]
+        xdot   = 0        # [m/s]
+        u_turb = 0        # [m/s]
+
+        optimization = 1
+        if optimization:
+            res = sp.optimize.minimize(fun=diff, x0=np.array([0.8, 0.23]), args=(RPM, pitch, V0, xdot, u_turb,
+                           nB, cone, r, chord, twist, polars,
+                           rho, KinVisc, a0, ap0, nacelle_L), bounds=((0.5,1.5), (0.15, 0.45)))
+
+        if blockage==1:
+            #u_turb = get_u_turb(x0=12, r=r, cone=cone, Uinf=V0, Cd=1, a=10, b=5, plot=2, export=1)        # [m/s] TODO add radial wake induction profile to u_turb
+            r=np.linspace(0, 105, 1000)
+            u_turb = get_u_turb(x0=0, r=r, cone=0, Uinf=8, Cd=0.2, a=1, b=0.2187, wake=True, type=
+            'rotor', plot=2, export=True)
+        elif blockage==2:
+            x0=0
+            CFD = pd.read_excel("../data/y0/nacelle_blockage_LES.xls", sheet_name=str(x0)+"_comparison_data")
+            r_CFD = CFD.loc[:, "y"].to_numpy()*nacelle_L
+            u_turb_CFD = CFD.loc[:, "u_turb"].to_numpy()
+            f = sp.interpolate.interp1d(r_CFD, u_turb_CFD)
+            u_turb = f(r)
+
+        BEM=MiniBEM(RPM,pitch,V0,xdot,u_turb,
+                    nB,cone,r,chord,twist,polars,
+                    rho=rho,KinVisc=KinVisc,bTIDrag=False,bAIDrag=True,
+                    a_init =a0, ap_init=ap0)
+        # Export radial data to file
+        if blockage==1:
+            filenameRadial = os.path.join(OutDir, 'BEM_ws{:02.0f}_x0={}_radial_blockage_EM.csv'.format(V0,x0))
+            BEM.WriteRadialFile(filenameRadial)
+            print('>>>', filenameRadial)
+            dfOut = BEM.StoreIntegratedValues(dfOut)
+            filenameOut = os.path.join(OutDir, 'BEM_IntegratedValues_x0={}__blockage_EM.csv'.format(x0))
+        elif blockage == 2:
+                filenameRadial = os.path.join(OutDir, 'BEM_ws{:02.0f}_x0={}_radial_blockage_CFD.csv'.format(V0,x0))
+                BEM.WriteRadialFile(filenameRadial)
+                print('>>>', filenameRadial)
+                dfOut = BEM.StoreIntegratedValues(dfOut)
+                filenameOut = os.path.join(OutDir, 'BEM_IntegratedValues_x0={}__blockage_CFD.csv'.format(x0))
+        else:
+            filenameRadial = os.path.join(OutDir,'BEM_ws{:02.0f}_radial.csv'.format(V0))
+            BEM.WriteRadialFile(filenameRadial)
+            print('>>>',filenameRadial)
+            dfOut = BEM.StoreIntegratedValues(dfOut)
+            filenameOut = os.path.join(OutDir, 'BEM_IntegratedValues_free_stream.csv')
+
+    # --- Export integrated values to file
+    dfOut.to_csv(filenameOut,sep='\t',index=False)
+    print('>>>',filenameOut)
+    return dfOut
+
+
+if __name__=="__main__":
+    OutDir                 = '_dataTmp'
+    MainFASTFile           = '../data/BAR-WT/RotorSE_FAST_BAR_005a.fst'
+    OperatingConditionFile = '../data/BAR_Rigid_Performances_FST.csv'
+
+    #  --- Reading turbine operating conditions, Pitch, RPM, WS  (From FAST)
+    df=weio.read(OperatingConditionFile).toDataFrame()
+    Pitch = df['BldPitch_[deg]'].values
+    Omega = df['RotSpeed_[rpm]'].values
+    WS    = df['WS_[m/s]'].values
+
+    dfOut = runParametricBEM_FAST(MainFASTFile, Pitch, Omega, WS)
